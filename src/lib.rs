@@ -82,6 +82,7 @@ pub struct RollingConditionBasic {
     last_write_opt: Option<DateTime<Local>>,
     frequency_opt: Option<RollingFrequency>,
     max_size_opt: Option<u64>,
+    roll_on_startup: bool,
 }
 
 impl RollingConditionBasic {
@@ -91,6 +92,7 @@ impl RollingConditionBasic {
             last_write_opt: None,
             frequency_opt: None,
             max_size_opt: None,
+            roll_on_startup: false,
         }
     }
 
@@ -117,6 +119,12 @@ impl RollingConditionBasic {
         self.max_size_opt = Some(x);
         self
     }
+
+    /// Sets a condition to rollover immediately on startup
+    pub fn roll_on_startup(mut self) -> RollingConditionBasic {
+        self.roll_on_startup = true;
+        self
+    }
 }
 
 impl Default for RollingConditionBasic {
@@ -139,6 +147,9 @@ impl RollingCondition for RollingConditionBasic {
             if current_filesize >= *max_size {
                 rollover = true;
             }
+        }
+        if self.roll_on_startup && self.last_write_opt.is_none() {
+            rollover = true;
         }
         self.last_write_opt = Some(*now);
         rollover
@@ -368,8 +379,16 @@ mod t {
         }
     }
 
-    fn build_context(condition: RollingConditionBasic, max_files: usize, buffer_capacity: Option<usize>) -> Context {
+    fn build_context(condition: RollingConditionBasic, max_files: usize, buffer_capacity: Option<usize>
+                , create_initial_file: bool) -> Context {
         let tempdir = tempfile::tempdir().unwrap();
+        if create_initial_file {
+            let p = tempdir.path().join("test.log");
+            let f = File::create(&p).unwrap();
+            let mut writer = BufWriter::new(f);
+            writer.write_all(b"Initial contents\n").unwrap();
+            writer.flush().unwrap();
+        }
         let rolling = match buffer_capacity {
             None => BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
             Some(capacity) => BasicRollingFileAppender::new_with_buffer_capacity(
@@ -388,7 +407,7 @@ mod t {
 
     #[test]
     fn frequency_every_day() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, None, false);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -415,7 +434,7 @@ mod t {
 
     #[test]
     fn frequency_every_day_limited_files() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 2, None);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 2, None, false);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -441,7 +460,7 @@ mod t {
 
     #[test]
     fn frequency_every_hour() {
-        let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None, false);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -468,6 +487,7 @@ mod t {
             RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute),
             9,
             None,
+            false,
         );
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
@@ -499,7 +519,7 @@ mod t {
 
     #[test]
     fn max_size() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None, false);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -527,7 +547,7 @@ mod t {
 
     #[test]
     fn max_size_existing() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None, false);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -559,7 +579,7 @@ mod t {
 
     #[test]
     fn daily_and_max_size() {
-        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None, false);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -587,7 +607,7 @@ mod t {
 
     #[test]
     fn default_buffer_capacity() {
-        let c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        let c = build_context(RollingConditionBasic::new().daily(), 9, None, false);
         // currently capacity should be 8192; but it may change (ref: https://doc.rust-lang.org/std/io/struct.BufWriter.html#method.new)
         // so we can't hard code and there's no way to get default capacity other than creating a dummy one...
         let default_capacity = BufWriter::new(tempfile::tempfile().unwrap()).capacity();
@@ -602,7 +622,7 @@ mod t {
 
     #[test]
     fn large_buffer_capacity_and_flush() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9, Some(100_000));
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, Some(100_000), false);
         assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100_000));
         c.verify_not_contains("12345", 0);
 
@@ -626,6 +646,27 @@ mod t {
             .unwrap();
         c.flush();
         c.verify_contains("12345", 0);
+    }
+
+    #[test]
+    // a test to ensure that the file is rolled over immediately on startup
+    fn roll_on_startup() {
+        let mut c = build_context(RollingConditionBasic::new().daily().roll_on_startup(), 3, None, true);
+        // Write a line to the file, this should force a rollover
+        c.rolling
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .unwrap();
+        // Write another line to the file, this should NOT force a rollover
+        c.rolling
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .unwrap();
+        c.flush();
+        c.verify_contains("Line 1", 0);
+        c.verify_contains("Initial contents", 1);
+
+        assert!(AsRef::<Path>::as_ref(&c.rolling.filename_for(0)).exists());
+        assert!(AsRef::<Path>::as_ref(&c.rolling.filename_for(1)).exists());
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(2)).exists());
     }
 }
 // LCOV_EXCL_STOP
